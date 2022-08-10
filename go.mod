@@ -4,7 +4,6 @@ go 1.19
 
 require (
 	github.com/aler9/gortsplib v0.0.0-20220807120100-4b19822d5158
-	github.com/gorilla/websocket v1.5.0
 	github.com/pion/interceptor v0.1.12
 	github.com/pion/webrtc/v3 v3.1.43
 )

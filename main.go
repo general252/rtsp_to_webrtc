@@ -1,27 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
-	"fmt"
-	"github.com/aler9/gortsplib"
-	"github.com/aler9/gortsplib/pkg/url"
-	"github.com/gorilla/websocket"
-	"github.com/pion/webrtc/v3/pkg/media"
 	"html/template"
-	"io"
 	"log"
 	"net"
 	"net/http"
 	"time"
 
+	"github.com/aler9/gortsplib"
+	"github.com/aler9/gortsplib/pkg/url"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media"
 )
 
 var (
-	webrtcAPI          *webrtc.API //nolint
-	outboundVideoTrack *webrtc.TrackLocalStaticSample
-	havePeerConnection = false
+	webrtcAPI *webrtc.API
 )
 
 const (
@@ -36,12 +32,11 @@ func main() {
 	webrtcAPI = webrtc.NewAPI(getMuxOptions()...)
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		_ = homeTemplate.Execute(w, nil)
+		_ = homeTemplate.Execute(w, rtspURL)
 	})
 	http.HandleFunc("/doSignaling", doSignaling)
-	http.HandleFunc("/h264_sender", handleWebsocketConnection)
 
-	fmt.Println("Open http://localhost:8080 to access this demo")
+	log.Println("Open http://localhost:8080 to access this demo")
 	panic(http.ListenAndServe("0.0.0.0:8080", nil))
 }
 
@@ -57,50 +52,77 @@ func doSignaling(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 
-	// Create a video track
-	outboundVideoTrack, err = webrtc.NewTrackLocalStaticSample(
-		webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeH264,
-		},
-		"pion-rtsp-video", "pion-rtsp-video-stream",
+	var (
+		track webrtc.TrackLocal
+
+		isUseSample              = true
+		outboundVideoTrackSample *webrtc.TrackLocalStaticSample
+		outboundVideoTrackRTP    *webrtc.TrackLocalStaticRTP
 	)
-	//videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "video", "pion")
-	if err != nil {
-		panic(err)
-	}
 
-	rtpSender, err := peerConnection.AddTrack(outboundVideoTrack)
-	if err != nil {
-		panic(err)
-	}
-
-	// Read incoming RTCP packets
-	// Before these packets are returned they are processed by interceptors. For things
-	// like NACK this needs to be called.
-	go func() {
-		rtcpBuf := make([]byte, 1500)
-		for {
-			if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
-				return
-			}
+	if isUseSample {
+		// Create a video track
+		outboundVideoTrackSample, err = webrtc.NewTrackLocalStaticSample(
+			webrtc.RTPCodecCapability{
+				MimeType: webrtc.MimeTypeH264,
+			},
+			"pion-rtsp-video-sample", "pion-rtsp-video-stream-sample",
+		)
+		//videoTrack, err := webrtc.NewTrackLocalStaticSample(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, "video", "pion")
+		if err != nil {
+			panic(err)
 		}
-	}()
+
+		track = outboundVideoTrackSample
+	} else {
+		// Create a video track
+		outboundVideoTrackRTP, err = webrtc.NewTrackLocalStaticRTP(
+			webrtc.RTPCodecCapability{
+				MimeType: webrtc.MimeTypeH264,
+			},
+			"pion-rtsp-video-rtp", "pion-rtsp-video-stream-rtp",
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		track = outboundVideoTrackRTP
+	}
+
+	{
+		rtpSender, err := peerConnection.AddTrack(track)
+		if err != nil {
+			panic(err)
+		}
+
+		// Read incoming RTCP packets
+		// Before these packets are returned they are processed by interceptors. For things
+		// like NACK this needs to be called.
+		go func() {
+			rtcpBuf := make([]byte, 1500)
+			for {
+				if _, _, rtcpErr := rtpSender.Read(rtcpBuf); rtcpErr != nil {
+					return
+				}
+			}
+		}()
+	}
 
 	// Set the handler for ICE connection state
 	// This will notify you when the peer has connected/disconnected
 	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
-		fmt.Printf(" [ice state] Connection State has changed %s \n", connectionState.String())
+		log.Printf("[ice state] Connection State has changed %s \n", connectionState.String())
 
 		if connectionState == webrtc.ICEConnectionStateFailed {
 			if closeErr := peerConnection.Close(); closeErr != nil {
-				panic(closeErr)
+				log.Println(closeErr)
 			}
 		}
 	})
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			fmt.Printf(" [ice] OnICECandidate %s \n", candidate.String())
+			log.Printf("[ice] OnICECandidate %s \n", candidate.String())
 		}
 	})
 
@@ -125,6 +147,7 @@ func doSignaling(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 
+	log.Println("wait PeerConnection complete")
 	// Block until ICE Gathering is complete, disabling trickle ICE
 	// we do this because we only can exchange one signaling message
 	// in a production application you should exchange ICE Candidates via OnICECandidate
@@ -140,10 +163,8 @@ func doSignaling(w http.ResponseWriter, r *http.Request) {
 		panic(err)
 	}
 
-	havePeerConnection = true
-	fmt.Printf("========================================== havePeerConnection \n")
-
-	go rtspConsumer(rtspURL, outboundVideoTrack)
+	log.Printf("==== havePeerConnection")
+	go rtspConsumer(rtspURL, isUseSample, peerConnection, outboundVideoTrackSample, outboundVideoTrackRTP)
 }
 
 func getMuxOptions() []func(*webrtc.API) {
@@ -159,7 +180,7 @@ func getMuxOptions() []func(*webrtc.API) {
 	_ = udpListener.SetWriteBuffer(512 * 1024)
 	_ = udpListener.SetReadBuffer(512 * 1024)
 
-	fmt.Printf("Listening for WebRTC traffic at %s\n", udpListener.LocalAddr())
+	log.Printf("Listening for WebRTC traffic at %s\n", udpListener.LocalAddr())
 
 	var options []func(*webrtc.API)
 
@@ -235,27 +256,41 @@ func getMuxOptions() []func(*webrtc.API) {
 // Connect to an RTSP URL and pull media.
 // Convert H264 to Annex-B, then write to outboundVideoTrack which sends to all PeerConnections
 // rtspConsumer 接收rtsp h264流
-func rtspConsumer(rtspURL string, videoTrack *webrtc.TrackLocalStaticSample) {
-	c := gortsplib.Client{}
-
+func rtspConsumer(rtspURL string, isUseSample bool, pc *webrtc.PeerConnection, sampleVideTrack *webrtc.TrackLocalStaticSample, rtpVideoTrack *webrtc.TrackLocalStaticRTP) {
 	// parse URL
 	u, err := url.Parse(rtspURL)
 	if err != nil {
-		panic(err)
+		log.Println(err)
+		return
 	}
 
+	c := gortsplib.Client{}
+
 	// connect to the server
-	err = c.Start(u.Scheme, u.Host)
-	if err != nil {
-		panic(err)
+	if err = c.Start(u.Scheme, u.Host); err != nil {
+		log.Println(err)
+		return
 	}
-	defer c.Close()
+	defer func() {
+		_ = c.Close()
+	}()
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateClosed {
+			log.Println("close rtsp")
+			_ = c.Close()
+		}
+	})
 
 	// find published tracks
 	tracks, baseURL, _, err := c.Describe(u)
 	if err != nil {
 		log.Println(err)
 		return
+	}
+
+	for _, track := range tracks {
+		log.Printf("track %#v", track)
 	}
 
 	// find the H264 track
@@ -271,11 +306,13 @@ func rtspConsumer(rtspURL string, videoTrack *webrtc.TrackLocalStaticSample) {
 		log.Println("H264 track not found")
 		return
 	}
+	_ = h264track
 
-	h264track.SafeSPS()
-	h264track.SafePPS()
-
-	var previousTime time.Duration
+	var (
+		annexBNALUStartCode = []byte{0x00, 0x00, 0x00, 0x01}
+		previousTime        time.Duration
+		packetBuffer        bytes.Buffer
+	)
 
 	// called when a RTP packet arrives
 	c.OnPacketRTP = func(ctx *gortsplib.ClientOnPacketRTPCtx) {
@@ -291,59 +328,41 @@ func rtspConsumer(rtspURL string, videoTrack *webrtc.TrackLocalStaticSample) {
 			return
 		}
 
-		for _, nalUs := range ctx.H264NALUs {
+		if isUseSample {
+			packetBuffer.Reset()
+			for _, nalUs := range ctx.H264NALUs {
+				packetBuffer.Write(annexBNALUStartCode)
+				packetBuffer.Write(nalUs)
+			}
+
 			bufferDuration := ctx.H264PTS - previousTime
 			previousTime = ctx.H264PTS
 
-			if err = videoTrack.WriteSample(media.Sample{Data: nalUs, Duration: bufferDuration}); err != nil && err != io.ErrClosedPipe {
-				panic(err)
-			}
+			err = sampleVideTrack.WriteSample(media.Sample{
+				Data:     packetBuffer.Bytes(),
+				Duration: bufferDuration,
+			})
+		} else {
+			// 有问题
+			err = rtpVideoTrack.WriteRTP(ctx.Packet)
 		}
 
+		if err != nil {
+			log.Println(err)
+		}
 	}
+
+	log.Println("[rtsp] setup and play")
 
 	// setup and read all tracks
-	err = c.SetupAndPlay(tracks, baseURL)
-	if err != nil {
-		panic(err)
+	if err = c.SetupAndPlay(tracks, baseURL); err != nil {
+		log.Println(err)
 	}
 
+	log.Println("[rtsp] wait...")
 	// wait until a fatal error
-	panic(c.Wait())
-}
-
-// handleWebsocketConnection websocket接收h264流
-func handleWebsocketConnection(w http.ResponseWriter, r *http.Request) {
-	fmt.Printf("-------------------------- new websocket connection")
-	var upgrader = websocket.Upgrader{} // use default options
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Print("upgrade:", err)
-		return
-	}
-	defer func() {
-		_ = conn.Close()
-	}()
-
-	for {
-		_, buffer, err := conn.ReadMessage()
-		if err != nil {
-			fmt.Printf("Read fail. %v", err)
-			break
-		}
-
-		if !havePeerConnection {
-			continue
-		}
-
-		err = outboundVideoTrack.WriteSample(media.Sample{Data: buffer, Duration: time.Millisecond * 33})
-		if err != nil {
-			fmt.Printf("WriteSample fail. %v", err)
-			break
-		} else {
-			fmt.Printf("send %v \n", len(buffer))
-		}
+	if err = c.Wait(); err != nil {
+		log.Println(err)
 	}
 }
 
@@ -353,16 +372,20 @@ var homeTemplate = template.Must(template.New("").Parse(`
     <title>rtsp-bench</title>
 </head>
 
-<body>
-<div id="remoteVideos"></div>
-<br/>
-
 <div>
-    <button onclick="window.doSignaling(false)"> create offer </button>
+RTSP: {{.}}
+</div>
+<div>
+    <button onclick="window.doSignaling(false)" style="font-size:30; "> create offer </button>
 </div>
 
 <h3> Logs </h3>
 <div id="logs"></div>
+
+<body>
+<div id="remoteVideos"></div>
+<br/>
+
 </body>
 
 <script>
@@ -377,7 +400,9 @@ var homeTemplate = template.Must(template.New("").Parse(`
         let el = document.createElement(event.track.kind)
         el.srcObject = event.streams[0]
         el.autoplay = true
-        el.controls = true
+        el.controls = false
+		el.width = 1280
+		el.height = 720
 
         document.getElementById('remoteVideos').appendChild(el)
     }
