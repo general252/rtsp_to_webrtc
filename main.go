@@ -11,7 +11,7 @@ import (
 //go:embed static/*
 var fileContent embed.FS
 
-func main() {
+func mainX() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
 
 	// Create a new API using our SettingEngine
@@ -36,4 +36,20 @@ func main() {
 	if err := r.Run(":8080"); err != nil {
 		log.Println(err)
 	}
+}
+
+func main() {
+	go mainX()
+
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
+
+	go func() {
+		_ = offer()
+	}()
+
+	go func() {
+		_ = answer()
+	}()
+
+	select {}
 }

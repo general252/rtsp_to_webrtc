@@ -48,7 +48,10 @@
     //pc.addTransceiver('video', {'direction': 'recvonly'})
 
     window.doSignaling = iceRestart => {
-        pc.createOffer({iceRestart})
+        pc.createOffer({
+            offerToReceiveVideo: true,
+            iceRestart: true,
+        })
             .then(offer => {
                 pc.setLocalDescription(offer)
 

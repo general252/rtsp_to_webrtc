@@ -2,7 +2,12 @@ package pkg
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
+	"github.com/pion/webrtc/v3/pkg/media"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"time"
 
@@ -118,16 +123,83 @@ func (tis *WebRtcEngine) RtspToWebrtc(c *gin.Context) {
 	// in a production application you should exchange ICE Candidates via OnICECandidate
 	<-gatherComplete
 
+	data, _ := json.MarshalIndent(peerConnection.LocalDescription(), "", "  ")
+	log.Println(string(data))
 	c.JSON(http.StatusOK, peerConnection.LocalDescription())
 
 	log.Printf("==== havePeerConnection")
-	go rtspConsumer(RtspURL, peerConnection, videoTrack)
+	// go RtspConsumerRTP(RtspURL, peerConnection, videoTrack)
+	go Rtp(5004, peerConnection, videoTrack)
 }
 
-// Connect to an RTSP URL and pull media.
-// Convert H264 to Annex-B, then write to outboundVideoTrack which sends to all PeerConnections
-// rtspConsumer 接收rtsp h264流
-func rtspConsumer(rtspURL string, pc *webrtc.PeerConnection, videoTrack *webrtc.TrackLocalStaticRTP) {
+// RtspConsumerRTP rtsp转webrtc RTP
+func RtspConsumerRTP(rtspURL string, pc *webrtc.PeerConnection, videoTrack *webrtc.TrackLocalStaticRTP) {
+	// parse URL
+	u, err := url.Parse(rtspURL)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	c := gortsplib.Client{}
+
+	// connect to the server
+	if err = c.Start(u.Scheme, u.Host); err != nil {
+		log.Println(err)
+		return
+	}
+	defer func() {
+		_ = c.Close()
+	}()
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		if state == webrtc.PeerConnectionStateDisconnected {
+			log.Println("close rtsp")
+			_ = c.Close()
+		}
+		if state == webrtc.PeerConnectionStateClosed {
+			log.Println("close rtsp")
+			_ = c.Close()
+		}
+	})
+
+	// find published tracks
+	tracks, baseURL, _, err := c.Describe(u)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	for _, track := range tracks {
+		log.Printf("track %#v", track)
+	}
+
+	// called when a RTP packet arrives
+	c.OnPacketRTP = func(ctx *gortsplib.ClientOnPacketRTPCtx) {
+		pkt := ctx.Packet
+
+		// log.Println(pkt.Header.SequenceNumber)
+		if err = videoTrack.WriteRTP(pkt); err != nil {
+			log.Println(err)
+		}
+	}
+
+	log.Println("[rtsp] setup and play")
+
+	// setup and read all tracks
+	if err = c.SetupAndPlay(tracks, baseURL); err != nil {
+		log.Println(err)
+	}
+
+	log.Println("[rtsp] wait...")
+	// wait until a fatal error
+	if err = c.Wait(); err != nil {
+		log.Println(err)
+	}
+}
+
+// RtspConsumerSample rtsp转webrtc H264
+func RtspConsumerSample(rtspURL string, pc *webrtc.PeerConnection, videoTrack *webrtc.TrackLocalStaticSample) {
 	// parse URL
 	u, err := url.Parse(rtspURL)
 	if err != nil {
@@ -195,17 +267,7 @@ func rtspConsumer(rtspURL string, pc *webrtc.PeerConnection, videoTrack *webrtc.
 			return
 		}
 
-		if true {
-			pkt := ctx.Packet
-			_ = pkt
-
-			log.Println(pkt.Header.SequenceNumber)
-			if err = videoTrack.WriteRTP(pkt); err != nil {
-				log.Println(err)
-			}
-		}
-
-		if false {
+		{
 			if ctx.H264NALUs == nil {
 				return
 			}
@@ -220,10 +282,10 @@ func rtspConsumer(rtspURL string, pc *webrtc.PeerConnection, videoTrack *webrtc.
 			previousTime = ctx.H264PTS
 			_ = bufferDuration
 
-			//err = videoTrack.WriteSample(media.Sample{
-			//Data:     packetBuffer.Bytes(),
-			//Duration: bufferDuration,
-			//})
+			err = videoTrack.WriteSample(media.Sample{
+				Data:     packetBuffer.Bytes(),
+				Duration: bufferDuration,
+			})
 
 			if err != nil {
 				log.Println(err)
@@ -242,5 +304,42 @@ func rtspConsumer(rtspURL string, pc *webrtc.PeerConnection, videoTrack *webrtc.
 	// wait until a fatal error
 	if err = c.Wait(); err != nil {
 		log.Println(err)
+	}
+}
+
+// Rtp rtp转webrtc H264
+// ffmpeg -re -f lavfi -i testsrc=size=640x480:rate=30 -pix_fmt yuv420p -c:v libx264 -g 10 -preset ultrafast -tune zerolatency -f rtp rtp://127.0.0.1:5004?pkt_size=1200
+// ffmpeg -re -i input.mp4 -an -pix_fmt yuv420p -c:v libx264 -g 0.01 -f rtp rtp://127.0.0.1:5004?pkt_size=1200
+// ffmpeg -re -i input.mp4 -an -pix_fmt yuv420p -c:v libx264 -g 0.01 -preset ultrafast -tune zerolatency -f rtp rtp://127.0.0.1:5004?pkt_size=1200
+func Rtp(udpPort int, _ *webrtc.PeerConnection, videoTrack *webrtc.TrackLocalStaticRTP) {
+	// Open a UDP Listener for RTP Packets on port 5004
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: udpPort})
+	if err != nil {
+		panic(err)
+	}
+	defer func() {
+		if err = listener.Close(); err != nil {
+			panic(err)
+		}
+	}()
+
+	// Read RTP packets forever and send them to the WebRTC Client
+	inboundRTPPacket := make([]byte, 1600) // UDP MTU
+	for {
+		n, _, err := listener.ReadFrom(inboundRTPPacket)
+		if err != nil {
+			log.Println(err)
+			break
+		}
+
+		if _, err = videoTrack.Write(inboundRTPPacket[:n]); err != nil {
+			if errors.Is(err, io.ErrClosedPipe) {
+				// The peerConnection has been closed.
+				return
+			}
+
+			log.Println(err)
+			break
+		}
 	}
 }

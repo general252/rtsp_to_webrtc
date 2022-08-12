@@ -5,6 +5,7 @@ go 1.19
 require (
 	github.com/aler9/gortsplib v0.0.0-20220807120100-4b19822d5158
 	github.com/gin-gonic/gin v1.8.1
+	github.com/gookit/color v1.5.1
 	github.com/pion/interceptor v0.1.12
 	github.com/pion/rtcp v1.2.10
 	github.com/pion/rtp v1.7.13
@@ -38,6 +39,7 @@ require (
 	github.com/pion/turn/v2 v2.0.8 // indirect
 	github.com/pion/udp v0.1.1 // indirect
 	github.com/ugorji/go/codec v1.2.7 // indirect
+	github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778 // indirect
 	golang.org/x/crypto v0.0.0-20220516162934-403b01795ae8 // indirect
 	golang.org/x/net v0.0.0-20220630215102-69896b714898 // indirect
 	golang.org/x/sys v0.0.0-20220622161953-175b2fd9d664 // indirect
