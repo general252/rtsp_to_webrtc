@@ -1,0 +1,66 @@
+<html lang="en">
+<head>
+    <title>rtsp-bench</title>
+</head>
+
+<div>
+    <button onclick="window.doSignaling(false)" style="font-size: 30pt"> 推流</button>
+    <br/>
+  
+    <h3> Logs </h3>
+    <div id="logs"></div>
+
+    <video id="video1" width="640" height="480" autoplay muted></video>
+    <br/>
+
+</div>
+<body>
+<div id="remoteVideos"></div>
+<br/>
+
+</body>
+
+<script>
+    let pc = new RTCPeerConnection()
+
+    let log = msg => {
+        document.getElementById('logs').innerHTML += msg + '<br>'
+    }
+    pc.oniceconnectionstatechange = () => log(pc.iceConnectionState)
+    pc.onicecandidate = event => {
+        if (event.candidate === null) {
+            console.log(' local sdp:' + pc.localDescription)
+            console.log('remote sdp:' + pc.remoteDescription)
+        } else {
+            console.log(event.candidate)
+        }
+    }
+
+    window.doSignaling = iceRestart => {
+        navigator.mediaDevices.getUserMedia({video: true, audio: false})
+            .then(stream => {
+                document.getElementById('video1').srcObject = stream
+                stream.getTracks().forEach(track => pc.addTrack(track, stream))
+
+                pc.createOffer({iceRestart})
+                    .then(offer => {
+                        pc.setLocalDescription(offer)
+
+                        return fetch('/WebrtcToRtsp', {
+                            method: 'post',
+                            headers: {
+                                'Accept': 'application/json, text/plain, */*',
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(offer)
+                        })
+                    })
+                    .then(res => res.json())
+                    .then(res => pc.setRemoteDescription(res))
+                    .catch(alert)
+
+            }).catch(log)
+    }
+</script>
+</html>
+
